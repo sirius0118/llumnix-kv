@@ -342,13 +342,18 @@ def sched_rpc_server() -> RpcServer:
     return _g_sched_rpc_serv
 
 
+def engine_dp_rank(cfg: VllmConfig) -> int:
+    parallel = cfg.parallel_config
+    return getattr(parallel, "data_parallel_index", parallel.data_parallel_rank)
+
+
 def sched_rpc_server_port(cfg: VllmConfig) -> int:
     if "AQUILA_RPC_PROTOCOL" in os.environ and envs.VLLM_DP_MASTER_PORT>0:
-        dprank = cfg.parallel_config.data_parallel_rank
+        dprank = engine_dp_rank(cfg)
         return envs.VLLM_DP_MASTER_PORT + 10 + dprank + 256
     rpc_port = cfg.kv_transfer_config.kv_connector_extra_config.get("rpc_port", None)
     if rpc_port is not None:
-        return rpc_port + cfg.parallel_config.data_parallel_rank
+        return rpc_port + engine_dp_rank(cfg)
     assert cfg.kv_transfer_config.engine_available_port > 0
     return cfg.kv_transfer_config.engine_available_port
 

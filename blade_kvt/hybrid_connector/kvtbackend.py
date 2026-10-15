@@ -63,6 +63,7 @@ from .engine_proxy import (
     sched_rpc_server,
     sched_rpc_server_port,
     sched_rpc_server_host,
+    engine_dp_rank,
     set_param,
     use_flashinfer,
     use_mla,
@@ -327,6 +328,8 @@ def _get_inst_id(cfg: VllmConfig, fake_naming: bool = False) -> str:
             r = _get_main_node_pod_name()
     if r is None:
         r = str(uuid.uuid4())
+    if cfg.parallel_config.data_parallel_size == 1 and engine_dp_rank(cfg):
+        r = f"{r}-dp{engine_dp_rank(cfg)}"
     return r
 
 
@@ -386,7 +389,10 @@ def _reg_naming(naming_cli, cfg: VllmConfig):
 def _set_worker_envs(cfg: VllmConfig):
     extra = cfg.kv_transfer_config.kv_connector_extra_config
     if "kvt_port" in extra:
-        os.environ["BLLM_KVTRANS_PORT_BASE"] = str(extra["kvt_port"])
+        parallel = cfg.parallel_config
+        # Dense DP resets communication ranks to zero in each EngineCore.
+        offset = (engine_dp_rank(cfg) - parallel.data_parallel_rank) * parallel.world_size
+        os.environ["BLLM_KVTRANS_PORT_BASE"] = str(extra["kvt_port"] + offset)
     if "nic_affinity" in extra:
         os.environ["LLX_KVT_NIC_AFFINITY"] = extra["nic_affinity"]
     blade_kvt.set_envs()

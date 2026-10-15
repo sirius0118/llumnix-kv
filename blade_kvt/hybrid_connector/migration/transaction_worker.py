@@ -12,6 +12,7 @@ class WorkerTransactions:
 
         from blade_kvt import kv_transfer as blade
 
+        from ..engine_proxy import engine_dp_rank
         from ..kvtbackend import kvt_protocol
 
         if kvt_protocol() != "rdma":
@@ -22,7 +23,7 @@ class WorkerTransactions:
         self.client = self.backend._p._bladkv_cli
         self.server = self.backend._d._bladkv_srv
         self.coordinate = {
-            "dp": worker.vllm_config.parallel_config.data_parallel_rank,
+            "dp": engine_dp_rank(worker.vllm_config),
             "pp": get_pp_group().rank_in_group,
             "tp": get_tp_group().rank_in_group,
         }
