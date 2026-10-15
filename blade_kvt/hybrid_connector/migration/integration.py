@@ -22,6 +22,16 @@ def configure(vllm_config):
     # A distinct port range per replica; DP EngineCores and TP/PP workers use
     # separate offsets. Configuration reaches remote Monarch workers as well.
     parallel = vllm_config.parallel_config
+    if (
+        parallel.pipeline_parallel_size > 1
+        and parallel.data_parallel_size > 1
+        and parallel.enable_expert_parallel
+        and vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+    ):
+        raise ValueError(
+            "PP + DP + EP full CUDA graphs fail the vLLM 0.21 pause/resume regression; "
+            "use enforce_eager=True for this topology"
+        )
     width = parallel.data_parallel_size + parallel.world_size_across_dp
     ephemeral_start = int(Path("/proc/sys/net/ipv4/ip_local_port_range").read_text().split()[0])
     if ephemeral_start <= 1024 + width:
