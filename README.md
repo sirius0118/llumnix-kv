@@ -4,6 +4,26 @@ Llumnix-KV is a general, flexible, and high-performance KV cache transfer and st
 
 See also the [llumnix](https://github.com/llumnix-project/llumnix) repository for how to use Llumnix-KV in an end-to-end distributed serving deployment.
 
+## vLLM 0.21 migration adapter
+
+This branch includes `patches/vllm-v0.21.0.patch` for the standalone
+`HybridConnector` migration backend. Apply it to the vLLM source before building:
+
+```bash
+git apply --check /path/to/llumnix-kv/patches/vllm-v0.21.0.patch
+git apply /path/to/llumnix-kv/patches/vllm-v0.21.0.patch
+```
+
+The validation target is `0.21.0+zeta.all`, source commit
+`f65c123b10ccb3db216a8dab02742f5ba0a67b0e`; this is not a claim of compatibility
+with every 0.21 build. Validation uses Qwen3-30B-A3B, matching TP8 layouts,
+GDR, synchronous decoding and disabled prefix caching, with eager execution
+and CUDA Graph decode. Seeded sampling transfers each worker's request RNG;
+unseeded sampling, speculative decoding, PP/DP/EP migration and transactional
+rollback are outside this adapter's validated scope. Set
+`LLX_KVT_NIC_AFFINITY` to a comma-separated NIC name per local GPU to override
+automatic NIC selection.
+
 ## Architecture
 
 ```

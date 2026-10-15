@@ -148,6 +148,7 @@ class KVTMigration(HybridBackend):
             if susresp.code != CODE_OK:
                 resp.code = susresp.code
             resp.output_token_ids = susresp.output_token_ids
+            resp.rng_states = susresp.rng_states
         else:
             if self.get_request(req.reqid) is None:
                 _g_migrate_out_req_ids.discard(req.reqid)
@@ -163,4 +164,3 @@ class KVTMigration(HybridBackend):
 
         await writer.drain()
         return
-    

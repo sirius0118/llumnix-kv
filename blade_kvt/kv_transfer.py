@@ -84,10 +84,17 @@ else:
     from blade_kvt.kvtransfer_ops import (  # noqa: F401
         NamingClient,
         ReqMeta,
-        alloc_phy_cont_mem,
         connect_naming,
         current_worker_info,
     )
+
+
+    def alloc_phy_cont_mem(*args, **kwargs):
+        # The pybind-only build supports KV transfer without the Torch allocator.
+        allocator = getattr(blade_kvt.kvtransfer_ops, "alloc_phy_cont_mem", None)
+        if allocator is None:
+            raise RuntimeError("Physical contiguous allocation requires a Torch-enabled Blade-KVT build")
+        return allocator(*args, **kwargs)
 
 
 def get_kv_transfer_token_bytes(

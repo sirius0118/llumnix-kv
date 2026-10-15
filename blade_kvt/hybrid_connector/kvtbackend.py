@@ -254,6 +254,7 @@ class KVTResp(
     cached: int
     computed: int
     output_token_ids: Optional[list[int]] = None
+    rng_states: Optional[list[Optional[bytes]]] = None
 
 
 @dataclass
@@ -815,7 +816,10 @@ class PBackend(HybridBackend):
                 continue
             assert get_param(req, P_KVT_STATE) is None
 
-            maxcomputed = None
+            maxcomputed = (
+                min(req.num_computed_tokens, req.num_tokens - (self._gamma + 1))
+                if rdinfo.migration else None
+            )
             maxtokens = min(req.num_tokens, dinfo.max_tokens)
             if maxcomputed is not None:
                 maxtokens = min(maxtokens, maxcomputed)

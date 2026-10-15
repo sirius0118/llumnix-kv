@@ -12,9 +12,11 @@ from .. import PREALLOC_KEY, BackendMeta, HybridBackend
 from ..engine_proxy import (
     EngineCoreOutputs,
     EngineCoreRequest,
+    EngineCoreRequestType,
     KVCacheBlocks,
     KVConnectorRole,
     MsgpackDecoder,
+    MsgpackEncoder,
     PlaceholderModule,
     Request,
     SchedulerOutput,
@@ -23,6 +25,7 @@ from ..engine_proxy import (
     core_add_req,
     core_get_param,
     core_update_params,
+    core_suspend_with_rng,
     get_hybrid_sched_loop,
     get_ip,
     get_logger,
@@ -132,6 +135,7 @@ class SuspendResp(
     # cached_tokens: int = 0
     code: int
     output_token_ids: list[int] = []
+    rng_states: Optional[list[Optional[bytes]]] = None
 
 
 # Body:
@@ -199,6 +203,8 @@ class MigrationBackend(HybridBackend):
         self._susrespdec = msgspec.msgpack.Decoder(SuspendResp)
         self._dec = msgspec.msgpack.Decoder()
         self._packenc = msgspec.msgpack.Encoder()
+        # This RPC uses one frame; keep ndarray-backed logprobs inline.
+        self._output_encoder = MsgpackEncoder(size_threshold=1 << 63)
         self._kvtrespdec = msgspec.msgpack.Decoder(KVTResp)
 
         # migration in limits
@@ -236,7 +242,11 @@ class MigrationBackend(HybridBackend):
         if req is None:
             logger.info("suspend:finished: reqid=%s", susreq.reqid)
             return SuspendResp(code=CODE_REQNOTFOUND)
-        core_abort_req(susreq.reqid, "migration.suspend", False)
+        rng_states = None
+        if hasattr(EngineCoreRequestType, "CONNECTOR_CALL"):
+            rng_states = await core_suspend_with_rng(susreq.reqid)
+        else:
+            core_abort_req(susreq.reqid, "migration.suspend", False)
         logger.info("suspend start: req=%s", susreq)
 
         evt: Optional[asyncio.Event] = get_param(req, SUSPEND_EVT)
@@ -266,7 +276,8 @@ class MigrationBackend(HybridBackend):
             RequestStatus.FINISHED_LENGTH_CAPPED,
         ]
         if not stopped:
-            resp = SuspendResp(code=CODE_OK, output_token_ids=req.output_token_ids[:])
+            resp = SuspendResp(code=CODE_OK, output_token_ids=req.output_token_ids[:],
+                               rng_states=rng_states)
         else:
             resp = SuspendResp(code=CODE_REQNOTFOUND)
         logger.info(
@@ -405,7 +416,7 @@ class MigrationBackend(HybridBackend):
     async def _new_output_rpc(self, connp: ConnPool, outs: EngineCoreOutputs):
         msgbuf = bytearray.fromhex("00 00 00 00 00 00 00 00")
         struct.pack_into("=II", msgbuf, 0, NEW_OUTPUT_REQ, 0)
-        self._packenc.encode_into(outs, msgbuf, 8)
+        self._output_encoder.encode_into(outs, msgbuf, 8)
         struct.pack_into("=I", msgbuf, 4, len(msgbuf) - 8)
 
         ok = False
@@ -616,7 +627,8 @@ class MigrationBackend(HybridBackend):
             resp = KVTResp(code=susresp.code,
                            cached=req.num_computed_tokens,
                            computed=-1,
-                           output_token_ids=susresp.output_token_ids)
+                           output_token_ids=susresp.output_token_ids,
+                           rng_states=susresp.rng_states)
         else:
             dprank = self._cfg.parallel_config.data_parallel_rank
             tpsize = self._cfg.parallel_config.tensor_parallel_size
@@ -719,6 +731,10 @@ class MigrationBackend(HybridBackend):
             assert resp.output_token_ids is not None
 
             req.append_output_token_ids(resp.output_token_ids)
+            if resp.rng_states is not None:
+                if req.sampling_params.extra_args is None:
+                    req.sampling_params.extra_args = {}
+                req.sampling_params.extra_args["migration_rng_states"] = resp.rng_states
             req.num_computed_tokens = resp.cached
             assert req.num_computed_tokens <= req.num_tokens
             if req.num_computed_tokens >= req.num_tokens:

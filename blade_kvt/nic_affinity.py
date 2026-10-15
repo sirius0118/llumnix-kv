@@ -40,6 +40,13 @@ def _do_generate_nic_affinity_file(filepath):
 
 def generate():
     FILEPATH = "/tmp/pai_blade_llm_kvtransfer_rdma_nic_affinity.txt"
+    explicit = os.environ.get("LLX_KVT_NIC_AFFINITY")
+    if explicit:
+        names = [name.strip() for name in explicit.split(",")]
+        if any(not name or "/" in name or not os.path.isdir("/sys/class/infiniband/" + name) for name in names):
+            raise ValueError("Invalid explicit RDMA NIC affinity")
+        _persist_aff_data({str(i): name for i, name in enumerate(names)}, FILEPATH)
+        return
     try:
         _do_generate_nic_affinity_file(FILEPATH)
         return

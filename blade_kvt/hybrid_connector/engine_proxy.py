@@ -3,9 +3,11 @@
 # It is expected that BladeLLM/SGLang only needs to implement the interfaces
 # in this file to interface with the hybridconnector.
 
+import asyncio
 import functools
 import os
 from collections import defaultdict, deque
+from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Iterable, Optional, Union
 
 import vllm.envs as envs
@@ -201,6 +203,30 @@ def core_abort_req(reqid: str, reason: str, output: bool):
     assert kvconn is not None
     kvconn.on_abort_req(reqid, reason, output, iscore=False)
     return
+
+
+async def core_suspend_with_rng(reqid: str) -> Optional[list[Optional[bytes]]]:
+    """Capture RNG and stop scheduling at a completed model-step boundary."""
+    assert _g_core is not None
+    core = _g_core
+    result = Future()
+
+    def suspend():
+        if core.batch_queue or core.async_scheduling or core.use_spec_decode:
+            raise RuntimeError("RNG handoff requires synchronous, non-speculative decoding")
+        req = sched_get_req(reqid)
+        states = None
+        if (req is not None and req.sampling_params is not None
+                and req.sampling_params.temperature > 0
+                and req.sampling_params.seed is not None):
+            states = core.model_executor.collective_rpc(
+                "get_migration_rng_state", args=(reqid,))
+        core_abort_req(reqid, "migration.suspend", False)
+        return states
+
+    core.input_queue.put_nowait(
+        (EngineCoreRequestType.CONNECTOR_CALL, (suspend, result)))
+    return await asyncio.shield(asyncio.wrap_future(result))
 
 
 def merge_hybrid_blocks(grouped_blks, gamma=0, has_null_blk=False) -> list[int]:

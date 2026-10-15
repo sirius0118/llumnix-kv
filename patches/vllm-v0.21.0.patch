@@ -1,0 +1,828 @@
+diff --git a/vllm/config/kv_transfer.py b/vllm/config/kv_transfer.py
+index b22af99f70..a9be4e5bd4 100644
+--- a/vllm/config/kv_transfer.py
++++ b/vllm/config/kv_transfer.py
+@@ -7,6 +7,7 @@ from typing import Any, Literal, get_args
+ 
+ from vllm.config.utils import config
+ from vllm.utils.hashing import safe_hash
++from vllm.utils.network_utils import get_open_port
+ 
+ KVProducer = Literal["kv_producer", "kv_both"]
+ KVConsumer = Literal["kv_consumer", "kv_both"]
+@@ -64,6 +65,10 @@ class KVTransferConfig:
+     """The Python module path to dynamically load the KV connector from.
+     Only supported in V1."""
+ 
++    engine_available_port: int = get_open_port()
++    """An available port that the KV connector can listen to, useful for dynamic
++    port allocation. TODO(siqian) better approach?"""
++
+     enable_permute_local_kv: bool = False
+     """Experiment feature flag to enable HND to NHD KV Transfer"""
+ 
+diff --git a/vllm/distributed/kv_transfer/kv_connector/factory.py b/vllm/distributed/kv_transfer/kv_connector/factory.py
+index 30df07c091..f33dabe465 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/factory.py
++++ b/vllm/distributed/kv_transfer/kv_connector/factory.py
+@@ -217,3 +217,7 @@ KVConnectorFactory.register_connector(
+     "vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_connector",
+     "HF3FSKVConnector",
+ )
++
++KVConnectorFactory.register_connector(
++    "HybridConnector", "blade_kvt.hybrid_connector", "HybridConnector"
++)
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/base.py b/vllm/distributed/kv_transfer/kv_connector/v1/base.py
+index a2fa9fa6c6..7ff8f82b36 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/base.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/base.py
+@@ -63,6 +63,7 @@ if TYPE_CHECKING:
+     )
+     from vllm.forward_context import ForwardContext
+     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
++    from vllm.v1.engine import EngineCoreOutput
+     from vllm.v1.kv_cache_interface import KVCacheConfig
+     from vllm.v1.request import Request
+ 
+@@ -520,6 +521,27 @@ class KVConnectorBase_V1(ABC):
+         """
+         return
+ 
++    def step(self) -> dict[int, list["EngineCoreOutput"]] | None:
++        return None
++
++    def on_add_req(self, req: "Request") -> bool:
++        return False
++
++    # thread safe
++    def on_abort_req(
++        self, reqid: str, reason: str = "", output: bool = True, iscore=True
++    ):
++        return
++
++    def has_requests(self) -> bool:
++        return False
++
++    def need_call_remote_migrate_in(self) -> bool:
++        return False
++
++    def has_migrate_in_reqs(self) -> bool:
++        return False
++
+     def request_finished(
+         self,
+         request: "Request",
+diff --git a/vllm/distributed/kv_transfer/kv_transfer_state.py b/vllm/distributed/kv_transfer/kv_transfer_state.py
+index 4392d65207..4b5df4c8f7 100644
+--- a/vllm/distributed/kv_transfer/kv_transfer_state.py
++++ b/vllm/distributed/kv_transfer/kv_transfer_state.py
+@@ -49,7 +49,7 @@ def is_v1_kv_transfer_group(connector: KVConnectorBaseType | None = None) -> boo
+ 
+ 
+ def ensure_kv_transfer_initialized(
+-    vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig"
++    vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig", local_rank: int = -1
+ ) -> None:
+     """
+     Initialize KV cache transfer parallel group.
+@@ -64,6 +64,14 @@ def ensure_kv_transfer_initialized(
+         vllm_config.kv_transfer_config.is_kv_transfer_instance
+         and _KV_CONNECTOR_AGENT is None
+     ):
++        if (
++            vllm_config.kv_transfer_config.kv_connector is not None
++            and vllm_config.kv_transfer_config.kv_connector == "HybridConnector"
++        ):
++            from blade_kvt.hybrid_connector.engine_proxy import worker_init
++
++            worker_init(vllm_config, local_rank)
++
+         _KV_CONNECTOR_AGENT = KVConnectorFactory.create_connector(
+             config=vllm_config,
+             role=KVConnectorRole.WORKER,
+diff --git a/vllm/envs.py b/vllm/envs.py
+index ded474dc08..fce9f36485 100755
+--- a/vllm/envs.py
++++ b/vllm/envs.py
+@@ -269,6 +269,24 @@ if TYPE_CHECKING:
+     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
+     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
+ 
++    VLLM_ATTENTION_BACKEND: str | None = None
++    VLLM_ENABLE_LLUMNIX: bool = False
++    LLUMNIX_DETAILED_MIG_STATUS: bool = False
++    LLUMNIX_MAX_REQ_MIG_IN: int = 1
++    LLUMNIX_MAX_TOKEN_MIG_IN: int = 10000
++    LLUMNIX_MAX_KV_CACHE_USAGE_RATIO_MIG_IN: float = 0.3
++    LLUMNIX_ENABLE_MIGRATION: bool = False
++    VLLM_ENABLE_BYPASS_TASK: bool = True
++    VLLM_KV_TRANS_PROTOCOL: str = "rdma"
++    VLLM_KVT_MAX_DELAY_MS: int = 0
++    VLLM_PD_CONNMANAGER_CAP: int = 128
++    VLLM_PD_TRY_CONNECT_TIMEOUT_SECONDS: float = 30
++    VLLM_KVS_IO_TIMEOUT_SECONDS: float = 30
++    VLLM_KVS_USE_REQUEST_HASH: bool = False
++    VLLM_KVS_ON_MIN_LENGTH: int = 1024
++    VLLM_USE_SWAP_ENGINE: bool = False
++    VLLM_USE_MIGRATION_BACKEND_RETURN_TOKEN: bool = False
++
+ 
+ def get_default_cache_root():
+     return os.getenv(
+@@ -507,6 +525,70 @@ def get_env_or_set_default(
+ logger = logging.getLogger(__name__)
+ 
+ environment_variables: dict[str, Callable[[], Any]] = {
++    # Backend for attention computation
++    # Example options:
++    # - "TORCH_SDPA": use torch.nn.MultiheadAttention
++    # - "FLASH_ATTN": use FlashAttention
++    # - "FLASHINFER": use flashinfer
++    # - "FLASHMLA": use FlashMLA
++    # - "FLASH_ATTN_MLA": use FlashAttention for MLA
++    # - "FLASHINFER_MLA": use FlashInfer for MLA
++    # - "CUTLASS_MLA": use CUTLASS for MLA
++    # All possible options loaded dynamically from AttentionBackendEnum
++    "VLLM_ATTENTION_BACKEND": env_with_choices(
++        "VLLM_ATTENTION_BACKEND",
++        None,
++        lambda: list(
++            __import__(
++                "vllm.v1.attention.backends.registry", fromlist=["AttentionBackendEnum"]
++            ).AttentionBackendEnum.__members__.keys()
++        ),
++    ),
++    # If set, enable Llumnix V1
++    "VLLM_ENABLE_LLUMNIX": lambda: bool(int(os.getenv("VLLM_ENABLE_LLUMNIX", "0"))),
++    # If set, collect detailed migration status for migration
++    "LLUMNIX_DETAILED_MIG_STATUS": lambda: bool(
++        int(os.getenv("LLUMNIX_DETAILED_MIG_STATUS", "0"))
++    ),
++    # Set to limit the max number of requests being migrated simultaneously
++    "LLUMNIX_MAX_REQ_MIG_IN": lambda: int(os.getenv("LLUMNIX_MAX_REQ_MIG_IN", "1")),
++    # Set to limit the max tokens of requests being migrated simultaneously
++    # only works when LLUMNIX_DETAILED_MIG_STATUS=True
++    "LLUMNIX_MAX_TOKEN_MIG_IN": lambda: int(
++        os.getenv("LLUMNIX_MAX_TOKEN_MIG_IN", "10000")
++    ),
++    # Limit the KV cache usage ratio of concurrent incoming migrations;
++    # only works when LLUMNIX_DETAILED_MIG_STATUS=True
++    "LLUMNIX_MAX_KV_CACHE_USAGE_RATIO_MIG_IN": lambda: float(
++        os.getenv("LLUMNIX_MAX_KV_CACHE_USAGE_RATIO_MIG_IN", "0.3")
++    ),
++    "LLUMNIX_ENABLE_MIGRATION": lambda: bool(
++        int(os.getenv("LLUMNIX_ENABLE_MIGRATION", "0"))
++    ),
++    "VLLM_KV_TRANS_PROTOCOL": lambda: os.getenv("VLLM_KV_TRANS_PROTOCOL", "rdma"),
++    "VLLM_ENABLE_BYPASS_TASK": lambda: (
++        os.getenv("VLLM_ENABLE_BYPASS_TASK", "True").lower() in ("true", "1")
++    ),
++    "VLLM_KVT_MAX_DELAY_MS": lambda: int(os.getenv("VLLM_KVT_MAX_DELAY_MS", "0")),
++    "VLLM_PD_CONNMANAGER_CAP": lambda: int(os.getenv("VLLM_PD_CONNMANAGER_CAP", "128")),
++    "VLLM_PD_TRY_CONNECT_TIMEOUT_SECONDS": lambda: float(
++        os.getenv("VLLM_PD_TRY_CONNECT_TIMEOUT_SECONDS", "30")
++    ),
++    # Control vineyard kv store io timeouts.
++    "VLLM_KVS_IO_TIMEOUT_SECONDS": lambda: float(
++        os.getenv("VLLM_KVS_IO_TIMEOUT_SECONDS", "30")
++    ),
++    "VLLM_KVS_USE_REQUEST_HASH": lambda: bool(
++        int(os.getenv("VLLM_KVS_USE_REQUEST_HASH", "0"))
++    ),
++    # Control whether vineyard kv store is enabled for this request.
++    "VLLM_KVS_ON_MIN_LENGTH": lambda: int(os.getenv("VLLM_KVS_ON_MIN_LENGTH", "1024")),
++    # If set, use the vllm swap engine
++    "VLLM_USE_SWAP_ENGINE": lambda: bool(int(os.getenv("VLLM_USE_SWAP_ENGINE", "0"))),
++    # Use migration backend to return token. Generally, this is used for test.
++    "VLLM_USE_MIGRATION_BACKEND_RETURN_TOKEN": lambda: bool(
++        int(os.getenv("VLLM_USE_MIGRATION_BACKEND_RETURN_TOKEN", "0"))
++    ),
+     # ================== Installation Time Env Vars ==================
+     # Target device of vLLM, supporting [cuda (by default),
+     # rocm, cpu]
+diff --git a/vllm/v1/core/kv_cache_manager.py b/vllm/v1/core/kv_cache_manager.py
+index 431776870c..bfe426da3a 100644
+--- a/vllm/v1/core/kv_cache_manager.py
++++ b/vllm/v1/core/kv_cache_manager.py
+@@ -311,7 +311,14 @@ class KVCacheManager:
+         """
+         # When loading KV data asynchronously, we may have zero new tokens to
+         # compute while still allocating slots for externally computed tokens.
+-        if num_new_tokens == 0 and num_external_computed_tokens == 0:
++        if (
++            num_new_tokens == 0
++            and num_external_computed_tokens == 0
++            and (
++                request.kv_transfer_params is None
++                or not request.kv_transfer_params.get("do_migrate_in")
++            )
++        ):
+             raise ValueError(
+                 "num_new_tokens must be greater than 0 when there are no "
+                 "external computed tokens"
+diff --git a/vllm/v1/core/sched/interface.py b/vllm/v1/core/sched/interface.py
+index 264811a556..35d9eabb4a 100644
+--- a/vllm/v1/core/sched/interface.py
++++ b/vllm/v1/core/sched/interface.py
+@@ -185,6 +185,10 @@ class SchedulerInterface(ABC):
+     def has_requests(self) -> bool:
+         """Returns True if there are unfinished requests, or finished requests
+         not yet returned in SchedulerOutputs."""
++        kvconn = self.get_kv_connector()
++        if kvconn and kvconn.has_requests():
++            return True
++
+         return self.has_unfinished_requests() or self.has_finished_requests()
+ 
+     @property
+diff --git a/vllm/v1/core/sched/output.py b/vllm/v1/core/sched/output.py
+index b2e9dd8b17..cdf00c4c87 100644
+--- a/vllm/v1/core/sched/output.py
++++ b/vllm/v1/core/sched/output.py
+@@ -31,6 +31,7 @@ else:
+ class NewRequestData:
+     req_id: str
+     prompt_token_ids: list[int] | None
++    output_token_ids: list[int]
+     mm_features: list[MultiModalFeatureSpec]
+     sampling_params: SamplingParams | None
+     pooling_params: PoolingParams | None
+@@ -53,6 +54,7 @@ class NewRequestData:
+         return cls(
+             req_id=request.request_id,
+             prompt_token_ids=request.prompt_token_ids,
++            output_token_ids=request.output_token_ids[:],
+             mm_features=request.mm_features,
+             sampling_params=request.sampling_params,
+             pooling_params=request.pooling_params,
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+index 8aaeb39700..7d59e45b71 100644
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -625,7 +625,11 @@ class Scheduler(SchedulerInterface):
+ 
+                 if load_kv_async:
+                     # KVTransfer: loading remote KV, do not allocate for new work.
+-                    assert num_external_computed_tokens > 0
++                    if (
++                        request.kv_transfer_params is None
++                        or not request.kv_transfer_params.get("do_migrate_in")
++                    ):
++                        assert num_external_computed_tokens > 0
+                     num_new_tokens = 0
+                 else:
+                     # Number of tokens to be scheduled.
+@@ -713,6 +717,14 @@ class Scheduler(SchedulerInterface):
+ 
+                 if new_blocks is None:
+                     # The request cannot be scheduled.
++                    if request.kv_transfer_params and request.kv_transfer_params.get(
++                        "do_migrate_in"
++                    ):
++                        logger.info(
++                            "Migrate-in request %s cannot be scheduled.",
++                            request.request_id,
++                        )
++                        request_queue.pop_request()
+ 
+                     # NOTE: we need to untouch the request from the encode cache
+                     # manager
+@@ -1413,6 +1425,13 @@ class Scheduler(SchedulerInterface):
+                 or kv_transfer_params
+                 or stopped
+             ):
++                # If pd disagg, ignore outputs from prefill instance
++                if (
++                    request.kv_transfer_params is not None
++                    and request.kv_transfer_params.get("ignore_output")
++                ):
++                    continue
++
+                 # Add EngineCoreOutput for this Request.
+                 outputs[request.client_index].append(
+                     EngineCoreOutput(
+@@ -1429,6 +1448,7 @@ class Scheduler(SchedulerInterface):
+                         trace_headers=request.trace_headers,
+                         routed_experts=routed_experts,
+                         num_nans_in_logits=request.num_nans_in_logits,
++                        queue_server_address=request.queue_server_address,
+                     )
+                 )
+             else:
+diff --git a/vllm/v1/engine/__init__.py b/vllm/v1/engine/__init__.py
+index f6c80055b6..75d722a03c 100644
+--- a/vllm/v1/engine/__init__.py
++++ b/vllm/v1/engine/__init__.py
+@@ -127,6 +127,7 @@ class EngineCoreRequest(
+     # request_finished hook. Used to free P-side prefill blocks when a
+     # KV-transfer request is rejected on the D node before engine admission.
+     abort_immediately: bool = False
++    queue_server_address: str | None = None
+ 
+     @property
+     def params(self) -> SamplingParams | PoolingParams:
+@@ -192,6 +193,9 @@ class EngineCoreOutput(
+     # A value greater than 0 indicates that the output is corrupted.
+     num_nans_in_logits: int = 0
+ 
++    # Llumnix queue server address
++    queue_server_address: str | None = None
++
+     @property
+     def finished(self) -> bool:
+         return self.finish_reason is not None
+@@ -255,6 +259,9 @@ class EngineCoreRequestType(enum.Enum):
+     # Sentinel to wake up input_queue.get() during shutdown.
+     WAKEUP = b"\x05"
+ 
++    EXECUTE_MODEL_RESULT = b"\x06"
++    CONNECTOR_CALL = b"\x07"
++
+ 
+ class ReconfigureDistributedRequest(msgspec.Struct):
+     new_data_parallel_size: int
+diff --git a/vllm/v1/engine/core.py b/vllm/v1/engine/core.py
+index 122cdd8f96..1ddf32461d 100644
+--- a/vllm/v1/engine/core.py
++++ b/vllm/v1/engine/core.py
+@@ -8,7 +8,7 @@ import threading
+ import time
+ from collections import defaultdict, deque
+ from collections.abc import Callable, Generator
+-from concurrent.futures import Future
++from concurrent.futures import Future, ThreadPoolExecutor
+ from contextlib import ExitStack, contextmanager
+ from enum import IntEnum
+ from functools import partial
+@@ -88,6 +88,30 @@ HANDSHAKE_TIMEOUT_MINS = 5
+ _R = TypeVar("_R")  # Return type for collective_rpc
+ 
+ 
++def _add_output(
++    output: dict[int, EngineCoreOutputs], input: dict[int, list[EngineCoreOutput]]
++):
++    for client_index, kvconn_output in input.items():
++        if client_index in output:
++            output[client_index].outputs.extend(kvconn_output)
++        else:
++            output[client_index] = EngineCoreOutputs(outputs=kvconn_output)
++    return
++
++
++def _core_init(core, vllm_config: VllmConfig):
++    if (
++        vllm_config.kv_transfer_config is None
++        or vllm_config.kv_transfer_config.kv_connector is None
++        or vllm_config.kv_transfer_config.kv_connector != "HybridConnector"
++    ):
++        return
++    from blade_kvt.hybrid_connector.engine_proxy import core_init
++
++    core_init(core, vllm_config)
++    return
++
++
+ class EngineCore:
+     """Inner loop of vLLM's Engine."""
+ 
+@@ -343,6 +367,10 @@ class EngineCore:
+                 "Disabling KVTransfer for this request."
+             )
+ 
++        kvconn = self.scheduler.get_kv_connector()
++        if kvconn and kvconn.on_add_req(request):
++            return
++
+         self.scheduler.add_request(request)
+         if request.abort_immediately:
+             # Immediately abort so the connector's request_finished hook runs
+@@ -352,6 +380,15 @@ class EngineCore:
+     def abort_requests(self, request_ids: list[str]):
+         """Abort requests from the scheduler."""
+ 
++        kvconn = self.scheduler.get_kv_connector()
++        if (
++            kvconn
++            and self.vllm_config.kv_transfer_config.kv_connector == "HybridConnector"
++        ):
++            for reqid in request_ids:
++                kvconn.on_abort_req(reqid, reason="core")
++            return
++
+         # TODO: The scheduler doesn't really need to know the
+         # specific finish reason, TBD whether we propagate that
+         # (i.e. client-aborted vs stop criteria met).
+@@ -403,6 +440,13 @@ class EngineCore:
+         )
+         self._iteration_index += 1
+ 
++    def _wait_model_output_future(
++        self,
++        model_output_future: Future[ModelRunnerOutput | None]
++        | Future[ModelRunnerOutput],
++    ) -> tuple[ModelRunnerOutput | None, dict[int, list[EngineCoreOutput]]]:
++        return model_output_future.result(), {}
++
+     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
+         """Schedule, execute, and make output.
+ 
+@@ -410,10 +454,18 @@ class EngineCore:
+         was executed.
+         """
+ 
++        kvconn = self.scheduler.get_kv_connector()
++        kvconn_outputs: dict[int, list[EngineCoreOutput]] | None = None
++        if kvconn:
++            kvconn_outputs = kvconn.step()
++
+         # Check for any requests remaining in the scheduler - unfinished,
+         # or finished and not yet removed from the batch.
+         if not self.scheduler.has_requests():
+-            return {}, False
++            outputs: dict[int, EngineCoreOutputs] = dict()
++            _add_output(outputs, kvconn_outputs or {})
++            return outputs, False
++
+         scheduler_output = self.scheduler.schedule()
+         future = self.model_executor.execute_model(scheduler_output, non_block=True)
+         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
+@@ -421,7 +473,7 @@ class EngineCore:
+             self.log_error_detail(scheduler_output),
+             self.log_iteration_details(scheduler_output),
+         ):
+-            model_output = future.result()
++            model_output, kvconn_outputs2 = self._wait_model_output_future(future)
+             if model_output is None:
+                 model_output = self.model_executor.sample_tokens(grammar_output)
+ 
+@@ -431,6 +483,8 @@ class EngineCore:
+         engine_core_outputs = self.scheduler.update_from_output(
+             scheduler_output, model_output
+         )
++        _add_output(engine_core_outputs, kvconn_outputs or {})
++        _add_output(engine_core_outputs, kvconn_outputs2 or {})
+ 
+         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
+ 
+@@ -469,6 +523,11 @@ class EngineCore:
+         # Note that this is not blocking.
+         assert len(batch_queue) < self.batch_queue_size
+ 
++        kvconn = self.scheduler.get_kv_connector()
++        kvconn_outputs: dict[int, list[EngineCoreOutput]] | None = None
++        if kvconn:
++            kvconn_outputs = kvconn.step()
++
+         model_executed = False
+         deferred_scheduler_output = None
+         if self.scheduler.has_requests():
+@@ -506,9 +565,11 @@ class EngineCore:
+                     and len(batch_queue) < self.batch_queue_size
+                     and not batch_queue[-1][0].done()
+                 ):
++                    outputs: dict[int, EngineCoreOutputs] = dict()
++                    _add_output(outputs, kvconn_outputs or {})
+                     # Don't block on next worker response unless the queue is full
+                     # or there are no more requests to schedule.
+-                    return None, True
++                    return outputs, True
+ 
+         elif not batch_queue:
+             # Queue is empty. We should not reach here since this method should
+@@ -522,7 +583,7 @@ class EngineCore:
+             self.log_error_detail(scheduler_output),
+             self.log_iteration_details(scheduler_output),
+         ):
+-            model_output = future.result()
++            model_output, kvconn_outputs2 = self._wait_model_output_future(future)
+             if model_output is None:
+                 # None from sample_tokens() implies that the original execute_model()
+                 # call failed - raise that exception.
+@@ -560,6 +621,8 @@ class EngineCore:
+             future = self.model_executor.sample_tokens(grammar_output, non_block=True)
+             batch_queue.appendleft((future, deferred_scheduler_output, exec_future))
+ 
++        _add_output(engine_core_outputs, kvconn_outputs or {})
++        _add_output(engine_core_outputs, kvconn_outputs2 or {})
+         return engine_core_outputs, model_executed
+ 
+     def _process_aborts_queue(self):
+@@ -807,6 +870,25 @@ class EngineShutdownState(IntEnum):
+     SHUTTING_DOWN = 2
+ 
+ 
++def _use_bypass(core: EngineCore) -> bool:
++    if not envs.VLLM_ENABLE_BYPASS_TASK:
++        return False
++    kvconn = core.scheduler.get_kv_connector()
++    if kvconn is None:
++        return False
++
++    try:
++        from blade_kvt.hybrid_connector import HybridConnector
++        from blade_kvt.hybrid_connector.engine_proxy import is_statemodel
++    except ImportError:
++        return False
++
++    if not isinstance(kvconn, HybridConnector):
++        return False
++
++    return not is_statemodel()
++
++
+ class EngineCoreProc(EngineCore):
+     """ZMQ-wrapper for running EngineCore in background process."""
+ 
+@@ -876,6 +958,7 @@ class EngineCoreProc(EngineCore):
+                     vllm_config=vllm_config,
+                 )
+             self._init_data_parallel(vllm_config)
++            _core_init(self, vllm_config)
+ 
+             super().__init__(
+                 vllm_config,
+@@ -922,6 +1005,12 @@ class EngineCoreProc(EngineCore):
+                 assert addresses.coordinator_input is not None
+                 logger.info("Waiting for READY message from DP Coordinator...")
+ 
++        self._enable_bypass = _use_bypass(self)
++        self.task_executor: ThreadPoolExecutor | None = None
++        if self._enable_bypass:
++            logger.info("enable bypass")
++            self.task_executor = ThreadPoolExecutor(max_workers=1)
++
+     @contextmanager
+     def _perform_handshakes(
+         self,
+@@ -1211,6 +1300,10 @@ class EngineCoreProc(EngineCore):
+ 
+         # Step the engine core.
+         outputs, model_executed = self.step_fn()
++        if outputs and envs.VLLM_USE_MIGRATION_BACKEND_RETURN_TOKEN:
++            from blade_kvt.hybrid_connector.migration.backend import on_outputs
++
++            on_outputs(outputs)
+         # Put EngineCoreOutputs into the output queue.
+         for output in outputs.items() if outputs else ():
+             self.output_queue.put_nowait(output)
+@@ -1274,6 +1367,13 @@ class EngineCoreProc(EngineCore):
+ 
+         if request_type == EngineCoreRequestType.WAKEUP:
+             return
++        elif request_type == EngineCoreRequestType.CONNECTOR_CALL:
++            # Deferred by the bypass loop until this model step has completed.
++            callback, future = request
++            try:
++                future.set_result(callback())
++            except Exception as exc:
++                future.set_exception(exc)
+         elif request_type == EngineCoreRequestType.ADD:
+             req, request_wave = request
+             if self._reject_add_in_shutdown(req):
+@@ -1543,6 +1643,102 @@ class EngineCoreProc(EngineCore):
+         )
+         self._send_error_outputs_to_client([request.request_id], request.client_index)
+ 
++    def _wait_model_output_future(
++        self,
++        model_output_future: Future[ModelRunnerOutput | None]
++        | Future[ModelRunnerOutput],
++    ) -> tuple[ModelRunnerOutput | None, dict[int, list[EngineCoreOutput]]]:
++        # For the GDN state model, tokens share state and do not support transfer
++        # during computation.
++        kvconn_outputs: dict[int, list[EngineCoreOutput]] = dict()
++        if not self._enable_bypass:
++            return model_output_future.result(), kvconn_outputs
++
++        def wait_model_output():
++            model_output_or_ex = None
++            try:
++                model_output_or_ex = model_output_future.result()
++            except Exception as e:
++                model_output_or_ex = e  # type: ignore
++            self.input_queue.put_nowait(
++                (EngineCoreRequestType.EXECUTE_MODEL_RESULT, model_output_or_ex)
++            )
++            return
++
++        assert self.task_executor is not None
++        self.task_executor.submit(wait_model_output)
++
++        temp_items: list[tuple[EngineCoreRequestType, Any]] = []
++
++        def _should_process_now(item: tuple[EngineCoreRequestType, Any]) -> bool:
++            reqtype, req = item
++            if reqtype == EngineCoreRequestType.ADD:
++                return True
++            if reqtype == EngineCoreRequestType.ABORT:
++                return True
++            if reqtype == EngineCoreRequestType.UTILITY:
++                _, _, method_name, _ = req
++                if method_name == "_start_step":
++                    return True
++                if method_name == "migrate_out":
++                    return True
++            temp_items.append(item)
++            return False
++
++        def _requeue_deferred_items():
++            with self.input_queue.mutex:
++                self.input_queue.queue.extendleft(reversed(temp_items))
++            return
++
++        kvconn = self.scheduler.get_kv_connector()
++        assert kvconn is not None
++        while True:
++            if not kvconn.has_requests():
++                item = self.input_queue.get()  # blocking op
++                if item[0] == EngineCoreRequestType.EXECUTE_MODEL_RESULT:
++                    _requeue_deferred_items()
++                    if isinstance(item[1], Exception):
++                        # kvconn_outputs will be discard
++                        raise item[1]
++                    else:
++                        return item[1], kvconn_outputs
++                if _should_process_now(item):
++                    self._handle_client_request(*item)
++
++            # process input queue
++            while not self.input_queue.empty():
++                item = self.input_queue.get_nowait()
++                if item[0] == EngineCoreRequestType.EXECUTE_MODEL_RESULT:
++                    _requeue_deferred_items()
++                    if isinstance(item[1], Exception):
++                        raise item[1]
++                    else:
++                        return item[1], kvconn_outputs
++                if _should_process_now(item):
++                    self._handle_client_request(*item)
++
++            # process kvconn step
++            step_outputs = kvconn.step()
++
++            if step_outputs:
++                for cliidx, outputs in step_outputs.items():
++                    if cliidx in kvconn_outputs:
++                        kvconn_outputs[cliidx].extend(outputs)
++                    else:
++                        kvconn_outputs[cliidx] = outputs
++
++            # process kvconn tasks
++            schedout: SchedulerOutput = SchedulerOutput.make_empty()
++            schedout.finished_req_ids = getattr(
++                self.scheduler, "finished_req_ids", set()
++            )
++            meta = kvconn.build_connector_meta(schedout)
++
++            from blade_kvt.hybrid_connector import send_bypass_task
++
++            send_bypass_task(meta)
++        return  # dead code
++
+     def pause_scheduler(
+         self, mode: PauseMode = "abort", clear_cache: bool = True
+     ) -> Future | None:
+diff --git a/vllm/v1/outputs.py b/vllm/v1/outputs.py
+index 4a7c7a5f38..98dd7ac76b 100644
+--- a/vllm/v1/outputs.py
++++ b/vllm/v1/outputs.py
+@@ -129,6 +129,7 @@ class KVConnectorOutput:
+     # [req_ids]
+     finished_sending: set[str] | None = None
+     finished_recving: set[str] | None = None
++    failed_sending: set[str] | None = None
+     kv_connector_stats: KVConnectorStats | None = None
+     kv_cache_events: KVConnectorKVEvents | None = None
+     kv_connector_worker_meta: KVConnectorWorkerMetadata | None = None
+diff --git a/vllm/v1/request.py b/vllm/v1/request.py
+index 0d435deb3f..6d7d4280c8 100644
+--- a/vllm/v1/request.py
++++ b/vllm/v1/request.py
+@@ -77,6 +77,7 @@ class Request:
+         reasoning_ended: bool | None = None,
+         reasoning_parser_kwargs: dict[str, Any] | None = None,
+         abort_immediately: bool = False,
++        queue_server_address: str | None = None,
+     ) -> None:
+         self.request_id = request_id
+         self.client_index = client_index
+@@ -186,6 +187,7 @@ class Request:
+         # If True, request should be aborted immediately after being added to
+         # the scheduler so the connector's request_finished hook runs.
+         self.abort_immediately = abort_immediately
++        self.queue_server_address = queue_server_address
+ 
+     @classmethod
+     def from_engine_core_request(
+@@ -212,6 +214,7 @@ class Request:
+             reasoning_ended=request.reasoning_ended,
+             reasoning_parser_kwargs=request.reasoning_parser_kwargs,
+             abort_immediately=request.abort_immediately,
++            queue_server_address=request.queue_server_address,
+         )
+ 
+     def append_output_token_ids(
+diff --git a/vllm/v1/serial_utils.py b/vllm/v1/serial_utils.py
+index 204c8bd0e4..41556ff376 100644
+--- a/vllm/v1/serial_utils.py
++++ b/vllm/v1/serial_utils.py
+@@ -177,13 +177,15 @@ class MsgpackEncoder:
+         finally:
+             self.aux_buffers = None
+ 
+-    def encode_into(self, obj: Any, buf: bytearray) -> Sequence[bytestr]:
++    def encode_into(
++        self, obj: Any, buf: bytearray, offset: int = 0
++    ) -> Sequence[bytestr]:
+         try:
+             if self.oob_tensor_consumer is not None:
+                 self.oob_tensor_consumer.new_message()
+             self.aux_buffers = [buf]
+             bufs = self.aux_buffers
+-            self.encoder.encode_into(obj, buf)
++            self.encoder.encode_into(obj, buf, offset)
+             return bufs
+         finally:
+             self.aux_buffers = None
+diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
+index 98b2fbf120..f749b0e80b 100644
+--- a/vllm/v1/worker/gpu_model_runner.py
++++ b/vllm/v1/worker/gpu_model_runner.py
+@@ -1161,6 +1161,16 @@ class GPUModelRunner(
+             ):
+                 generator = torch.Generator(device=self.device)
+                 generator.manual_seed(sampling_params.seed)
++                states = (sampling_params.extra_args or {}).get("migration_rng_states")
++                if states is not None:
++                    from vllm.distributed import get_tensor_model_parallel_rank
++
++                    state = states[get_tensor_model_parallel_rank()]
++                    if state is None:
++                        raise ValueError(
++                            "Missing RNG state for migrated seeded request"
++                        )
++                    generator.set_state(torch.tensor(list(state), dtype=torch.uint8))
+             else:
+                 generator = None
+ 
+@@ -1184,7 +1194,7 @@ class GPUModelRunner(
+                 generator=generator,
+                 block_ids=new_req_data.block_ids,
+                 num_computed_tokens=new_req_data.num_computed_tokens,
+-                output_token_ids=[],
++                output_token_ids=new_req_data.output_token_ids,
+                 lora_request=new_req_data.lora_request,
+             )
+             self.requests[req_id] = req_state
+diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
+index 18c7941a0e..846bcc8ac6 100644
+--- a/vllm/v1/worker/gpu_worker.py
++++ b/vllm/v1/worker/gpu_worker.py
+@@ -548,7 +548,9 @@ class Worker(WorkerBase):
+         # NOTE(Kuntai): This need to be done before `initialize_kv_cache`,
+         # because `initialize_kv_cache` will inject kv cache groups not
+         # related to kv cache connector (e.g. kv cache sharing layers).
+-        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
++        ensure_kv_transfer_initialized(
++            self.vllm_config, kv_cache_config, self.local_rank
++        )
+ 
+         if self.vllm_config.model_config.enable_sleep_mode:
+             from vllm.device_allocator.cumem import CuMemAllocator
+@@ -732,6 +734,12 @@ class Worker(WorkerBase):
+     def reset_encoder_cache(self) -> None:
+         self.model_runner.reset_encoder_cache()
+ 
++    def get_migration_rng_state(self, request_id: str) -> bytes | None:
++        request = self.model_runner.requests.get(request_id)
++        if request is None or request.generator is None:
++            return None
++        return bytes(request.generator.get_state().tolist())
++
+     def get_model(self) -> nn.Module:
+         return self.model_runner.get_model()
+ 
+diff --git a/vllm/v1/worker/kv_connector_model_runner_mixin.py b/vllm/v1/worker/kv_connector_model_runner_mixin.py
+index 4fc1aff94f..475598fbc3 100644
+--- a/vllm/v1/worker/kv_connector_model_runner_mixin.py
++++ b/vllm/v1/worker/kv_connector_model_runner_mixin.py
+@@ -106,9 +106,15 @@ class KVConnectorModelRunnerMixin:
+             if wait_for_save and not defer_finalize:
+                 kv_connector.wait_for_save()
+ 
+-            output.finished_sending, output.finished_recving = (
+-                kv_connector.get_finished(scheduler_output.finished_req_ids)
+-            )
++            kvconn_output = kv_connector.get_finished(scheduler_output.finished_req_ids)
++            if len(kvconn_output) == 3:
++                (
++                    output.finished_sending,
++                    output.finished_recving,
++                    output.failed_sending,
++                ) = kvconn_output
++            else:
++                output.finished_sending, output.finished_recving = kvconn_output
+             output.invalid_block_ids = kv_connector.get_block_ids_with_load_errors()
+ 
+             output.kv_connector_stats = kv_connector.get_kv_connector_stats()

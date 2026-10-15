@@ -469,7 +469,7 @@ class HybridScheduler:
                 f"HybridScheduler time stats: correlation_id={corre_id},"
                 f" num_prompt_tokens={req.num_prompt_tokens},"
                 f" num_computed_tokens={req.num_computed_tokens},"
-                f" num_external_computed_tokens={req.num_external_computed_tokens},"
+                f" num_external_computed_tokens={getattr(req, 'num_external_computed_tokens', None)},"
                 f" {intervals=}")
             self._reqs_ts.pop(corre_id)
 
@@ -620,7 +620,18 @@ class HybridScheduler:
 
             self._loading.pop(req.request_id, None)
             req.num_computed_tokens += ioret.n or 0
-            req.num_external_computed_tokens += ioret.n or 0
+            if hasattr(req, "num_external_computed_tokens"):
+                req.num_external_computed_tokens += ioret.n or 0
+            elif req.prefill_stats is not None:
+                external = min(ioret.n or 0, req.num_prompt_tokens)
+                req.prefill_stats.set(
+                    num_prompt_tokens=req.num_prompt_tokens,
+                    num_local_cached_tokens=min(
+                        req.num_computed_tokens - (ioret.n or 0),
+                        req.num_prompt_tokens - external,
+                    ),
+                    num_external_cached_tokens=external,
+                )
 
             max_computed = None
             if max_computed is not None:
