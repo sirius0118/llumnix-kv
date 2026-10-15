@@ -53,6 +53,7 @@ from .engine_proxy import (
     sched_get_req,
     sched_rpc_server,
     sched_rpc_server_port,
+    sched_rpc_server_host,
     set_param,
     wakeup_core,
 )
@@ -514,7 +515,7 @@ class HybridScheduler:
 
     # disagg thread, core thread
     def _tp_size(self):
-        return self._cfg.parallel_config.tensor_parallel_size
+        return self._cfg.parallel_config.world_size
 
     # core thread
     def step(self) -> Optional[dict[int, list[EngineCoreOutput]]]:
@@ -944,7 +945,7 @@ class HybridWorker:
 
         ### R/W: disaggw thread
         self._saving: dict[str, _WSavingReq] = dict()
-        core_ip = "127.0.0.1"  # get from kv_transfer config
+        core_ip = sched_rpc_server_host(self._cfg)
         self._connpool = ConnPool(core_ip, rpc_port(self._cfg), 3)
         self._ioenc = MsgpackEncoder()
 
@@ -958,7 +959,7 @@ class HybridWorker:
         return
 
     async def _get_bypass_handle(self):
-        core_ip = "127.0.0.1"
+        core_ip = sched_rpc_server_host(self._cfg)
         scheduler_port = rpc_port(self._cfg)
         # Scheduler Bypass server might not be ready yet
         await asyncio.sleep(2)
@@ -1090,7 +1091,8 @@ class HybridWorker:
 
     @kill_me_if_exception
     async def _async_load_kv(self, m: HybridMetadata):
-        tprank = get_tensor_model_parallel_rank()
+        from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+        tprank = get_pp_group().rank_in_group * get_tp_group().world_size + get_tensor_model_parallel_rank()
         async for reqid in self._backend.async_load_kv(m.reqs):
             loadreq = IoDoneReqs(worker_tprank=tprank, reqids=[reqid])
             await self._io_done_rpc(loadreq, _LOAD_DONE_REQ, _LOAD_DONE_RESP)
@@ -1106,7 +1108,8 @@ class HybridWorker:
         if len(state._ready_layers) != self._num_layers:
             return
 
-        tprank = get_tensor_model_parallel_rank()
+        from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+        tprank = get_pp_group().rank_in_group * get_tp_group().world_size + get_tensor_model_parallel_rank()
         savereq = IoDoneReqs(worker_tprank=tprank, reqids=[IoRet(reqid=reqid)])
         await self._io_done_rpc(savereq, _SAVE_DONE_REQ, _SAVE_DONE_RESP)
         self._saving.pop(reqid)

@@ -5,6 +5,7 @@ __pycache__/
 
 # C extensions
 *.so
+blade_kvt/.libs/
 
 # Distribution / packaging
 .Python

@@ -257,7 +257,7 @@ index b2e9dd8b17..cdf00c4c87 100644
              sampling_params=request.sampling_params,
              pooling_params=request.pooling_params,
 diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
-index 8aaeb39700..7d59e45b71 100644
+index 8aaeb39700..148b883979 100644
 --- a/vllm/v1/core/sched/scheduler.py
 +++ b/vllm/v1/core/sched/scheduler.py
 @@ -625,7 +625,11 @@ class Scheduler(SchedulerInterface):
@@ -288,7 +288,23 @@ index 8aaeb39700..7d59e45b71 100644
  
                      # NOTE: we need to untouch the request from the encode cache
                      # manager
-@@ -1413,6 +1425,13 @@ class Scheduler(SchedulerInterface):
+@@ -827,6 +839,15 @@ class Scheduler(SchedulerInterface):
+                 )
+ 
+         # Construct the scheduler output.
++        migrated_ids = getattr(self, "_asyncpb_new_req_ids", set())
++        for request in scheduled_running_reqs[:]:
++            if request.request_id in migrated_ids:
++                scheduled_running_reqs.remove(request)
++                scheduled_new_reqs.append(request)
++                req_to_new_blocks[request.request_id] = (
++                    self.kv_cache_manager.get_blocks(request.request_id)
++                )
++                migrated_ids.remove(request.request_id)
+         if self.use_v2_model_runner:
+             scheduled_new_reqs = scheduled_new_reqs + scheduled_resumed_reqs
+             scheduled_resumed_reqs = []
+@@ -1413,6 +1434,13 @@ class Scheduler(SchedulerInterface):
                  or kv_transfer_params
                  or stopped
              ):
@@ -302,7 +318,7 @@ index 8aaeb39700..7d59e45b71 100644
                  # Add EngineCoreOutput for this Request.
                  outputs[request.client_index].append(
                      EngineCoreOutput(
-@@ -1429,6 +1448,7 @@ class Scheduler(SchedulerInterface):
+@@ -1429,6 +1457,7 @@ class Scheduler(SchedulerInterface):
                          trace_headers=request.trace_headers,
                          routed_experts=routed_experts,
                          num_nans_in_logits=request.num_nans_in_logits,
@@ -311,7 +327,7 @@ index 8aaeb39700..7d59e45b71 100644
                  )
              else:
 diff --git a/vllm/v1/engine/__init__.py b/vllm/v1/engine/__init__.py
-index f6c80055b6..75d722a03c 100644
+index f6c80055b6..c79608814a 100644
 --- a/vllm/v1/engine/__init__.py
 +++ b/vllm/v1/engine/__init__.py
 @@ -127,6 +127,7 @@ class EngineCoreRequest(
@@ -322,17 +338,20 @@ index f6c80055b6..75d722a03c 100644
  
      @property
      def params(self) -> SamplingParams | PoolingParams:
-@@ -192,6 +193,9 @@ class EngineCoreOutput(
+@@ -192,6 +193,12 @@ class EngineCoreOutput(
      # A value greater than 0 indicates that the output is corrupted.
      num_nans_in_logits: int = 0
  
 +    # Llumnix queue server address
 +    queue_server_address: str | None = None
 +
++    migration_offset: int = 0
++    migration_generation: int = 0
++
      @property
      def finished(self) -> bool:
          return self.finish_reason is not None
-@@ -255,6 +259,9 @@ class EngineCoreRequestType(enum.Enum):
+@@ -255,6 +262,9 @@ class EngineCoreRequestType(enum.Enum):
      # Sentinel to wake up input_queue.get() during shutdown.
      WAKEUP = b"\x05"
  
@@ -343,7 +362,7 @@ index f6c80055b6..75d722a03c 100644
  class ReconfigureDistributedRequest(msgspec.Struct):
      new_data_parallel_size: int
 diff --git a/vllm/v1/engine/core.py b/vllm/v1/engine/core.py
-index 122cdd8f96..1ddf32461d 100644
+index 122cdd8f96..5a257ac834 100644
 --- a/vllm/v1/engine/core.py
 +++ b/vllm/v1/engine/core.py
 @@ -8,7 +8,7 @@ import threading
@@ -386,7 +405,28 @@ index 122cdd8f96..1ddf32461d 100644
  class EngineCore:
      """Inner loop of vLLM's Engine."""
  
-@@ -343,6 +367,10 @@ class EngineCore:
+@@ -312,12 +336,20 @@ class EngineCore:
+     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+         return self.model_executor.supported_tasks
+ 
++    def asyncpb_tail(self, operation: str, payload: str):
++        from blade_kvt.hybrid_connector.migration.transaction import core_rpc
++
++        return core_rpc(self, operation, payload)
++
+     def add_request(self, request: Request, request_wave: int = 0):
+         """Add request to the scheduler.
+ 
+         `request_wave`: indicate which wave of requests this is expected to
+         belong to in DP case
+         """
++        migration = getattr(self, "_asyncpb_tail", None)
++        if migration is not None and migration.on_add(request):
++            return
+         # Validate the request_id type.
+         if not isinstance(request.request_id, str):
+             raise TypeError(
+@@ -343,6 +375,10 @@ class EngineCore:
                  "Disabling KVTransfer for this request."
              )
  
@@ -397,7 +437,7 @@ index 122cdd8f96..1ddf32461d 100644
          self.scheduler.add_request(request)
          if request.abort_immediately:
              # Immediately abort so the connector's request_finished hook runs
-@@ -352,6 +380,15 @@ class EngineCore:
+@@ -352,6 +388,15 @@ class EngineCore:
      def abort_requests(self, request_ids: list[str]):
          """Abort requests from the scheduler."""
  
@@ -413,7 +453,7 @@ index 122cdd8f96..1ddf32461d 100644
          # TODO: The scheduler doesn't really need to know the
          # specific finish reason, TBD whether we propagate that
          # (i.e. client-aborted vs stop criteria met).
-@@ -403,6 +440,13 @@ class EngineCore:
+@@ -403,6 +448,13 @@ class EngineCore:
          )
          self._iteration_index += 1
  
@@ -427,7 +467,7 @@ index 122cdd8f96..1ddf32461d 100644
      def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
          """Schedule, execute, and make output.
  
-@@ -410,10 +454,18 @@ class EngineCore:
+@@ -410,10 +462,18 @@ class EngineCore:
          was executed.
          """
  
@@ -447,7 +487,7 @@ index 122cdd8f96..1ddf32461d 100644
          scheduler_output = self.scheduler.schedule()
          future = self.model_executor.execute_model(scheduler_output, non_block=True)
          grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
-@@ -421,7 +473,7 @@ class EngineCore:
+@@ -421,7 +481,7 @@ class EngineCore:
              self.log_error_detail(scheduler_output),
              self.log_iteration_details(scheduler_output),
          ):
@@ -456,7 +496,7 @@ index 122cdd8f96..1ddf32461d 100644
              if model_output is None:
                  model_output = self.model_executor.sample_tokens(grammar_output)
  
-@@ -431,6 +483,8 @@ class EngineCore:
+@@ -431,6 +491,8 @@ class EngineCore:
          engine_core_outputs = self.scheduler.update_from_output(
              scheduler_output, model_output
          )
@@ -465,7 +505,7 @@ index 122cdd8f96..1ddf32461d 100644
  
          return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
  
-@@ -469,6 +523,11 @@ class EngineCore:
+@@ -469,6 +531,11 @@ class EngineCore:
          # Note that this is not blocking.
          assert len(batch_queue) < self.batch_queue_size
  
@@ -477,7 +517,7 @@ index 122cdd8f96..1ddf32461d 100644
          model_executed = False
          deferred_scheduler_output = None
          if self.scheduler.has_requests():
-@@ -506,9 +565,11 @@ class EngineCore:
+@@ -506,9 +573,11 @@ class EngineCore:
                      and len(batch_queue) < self.batch_queue_size
                      and not batch_queue[-1][0].done()
                  ):
@@ -490,7 +530,7 @@ index 122cdd8f96..1ddf32461d 100644
  
          elif not batch_queue:
              # Queue is empty. We should not reach here since this method should
-@@ -522,7 +583,7 @@ class EngineCore:
+@@ -522,7 +591,7 @@ class EngineCore:
              self.log_error_detail(scheduler_output),
              self.log_iteration_details(scheduler_output),
          ):
@@ -499,7 +539,7 @@ index 122cdd8f96..1ddf32461d 100644
              if model_output is None:
                  # None from sample_tokens() implies that the original execute_model()
                  # call failed - raise that exception.
-@@ -560,6 +621,8 @@ class EngineCore:
+@@ -560,6 +629,8 @@ class EngineCore:
              future = self.model_executor.sample_tokens(grammar_output, non_block=True)
              batch_queue.appendleft((future, deferred_scheduler_output, exec_future))
  
@@ -508,7 +548,7 @@ index 122cdd8f96..1ddf32461d 100644
          return engine_core_outputs, model_executed
  
      def _process_aborts_queue(self):
-@@ -807,6 +870,25 @@ class EngineShutdownState(IntEnum):
+@@ -807,6 +878,25 @@ class EngineShutdownState(IntEnum):
      SHUTTING_DOWN = 2
  
  
@@ -534,7 +574,7 @@ index 122cdd8f96..1ddf32461d 100644
  class EngineCoreProc(EngineCore):
      """ZMQ-wrapper for running EngineCore in background process."""
  
-@@ -876,6 +958,7 @@ class EngineCoreProc(EngineCore):
+@@ -876,6 +966,7 @@ class EngineCoreProc(EngineCore):
                      vllm_config=vllm_config,
                  )
              self._init_data_parallel(vllm_config)
@@ -542,7 +582,7 @@ index 122cdd8f96..1ddf32461d 100644
  
              super().__init__(
                  vllm_config,
-@@ -922,6 +1005,12 @@ class EngineCoreProc(EngineCore):
+@@ -922,6 +1013,12 @@ class EngineCoreProc(EngineCore):
                  assert addresses.coordinator_input is not None
                  logger.info("Waiting for READY message from DP Coordinator...")
  
@@ -555,18 +595,21 @@ index 122cdd8f96..1ddf32461d 100644
      @contextmanager
      def _perform_handshakes(
          self,
-@@ -1211,6 +1300,10 @@ class EngineCoreProc(EngineCore):
+@@ -1211,6 +1308,13 @@ class EngineCoreProc(EngineCore):
  
          # Step the engine core.
          outputs, model_executed = self.step_fn()
-+        if outputs and envs.VLLM_USE_MIGRATION_BACKEND_RETURN_TOKEN:
++        migration = getattr(self, "_asyncpb_tail", None)
++        if migration is not None:
++            migration.capture_outputs(outputs)
++        if outputs and migration is None and envs.VLLM_USE_MIGRATION_BACKEND_RETURN_TOKEN:
 +            from blade_kvt.hybrid_connector.migration.backend import on_outputs
 +
 +            on_outputs(outputs)
          # Put EngineCoreOutputs into the output queue.
          for output in outputs.items() if outputs else ():
              self.output_queue.put_nowait(output)
-@@ -1274,6 +1367,13 @@ class EngineCoreProc(EngineCore):
+@@ -1274,6 +1378,13 @@ class EngineCoreProc(EngineCore):
  
          if request_type == EngineCoreRequestType.WAKEUP:
              return
@@ -580,7 +623,7 @@ index 122cdd8f96..1ddf32461d 100644
          elif request_type == EngineCoreRequestType.ADD:
              req, request_wave = request
              if self._reject_add_in_shutdown(req):
-@@ -1543,6 +1643,102 @@ class EngineCoreProc(EngineCore):
+@@ -1543,6 +1654,102 @@ class EngineCoreProc(EngineCore):
          )
          self._send_error_outputs_to_client([request.request_id], request.client_index)
  
@@ -746,10 +789,10 @@ index 204c8bd0e4..41556ff376 100644
          finally:
              self.aux_buffers = None
 diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
-index 98b2fbf120..f749b0e80b 100644
+index 98b2fbf120..79f8a19e61 100644
 --- a/vllm/v1/worker/gpu_model_runner.py
 +++ b/vllm/v1/worker/gpu_model_runner.py
-@@ -1161,6 +1161,16 @@ class GPUModelRunner(
+@@ -1161,9 +1161,26 @@ class GPUModelRunner(
              ):
                  generator = torch.Generator(device=self.device)
                  generator.manual_seed(sampling_params.seed)
@@ -766,7 +809,17 @@ index 98b2fbf120..f749b0e80b 100644
              else:
                  generator = None
  
-@@ -1184,7 +1194,7 @@ class GPUModelRunner(
++            if hasattr(self, "_asyncpb_rng_states"):
++                from blade_kvt.hybrid_connector.migration.transaction_worker import (
++                    restore_generator,
++                )
++
++                restore_generator(self, req_id, generator)
++
+             if self.is_pooling_model:
+                 assert pooling_params is not None
+                 task = pooling_params.task
+@@ -1184,7 +1201,7 @@ class GPUModelRunner(
                  generator=generator,
                  block_ids=new_req_data.block_ids,
                  num_computed_tokens=new_req_data.num_computed_tokens,
@@ -776,7 +829,7 @@ index 98b2fbf120..f749b0e80b 100644
              )
              self.requests[req_id] = req_state
 diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
-index 18c7941a0e..846bcc8ac6 100644
+index 18c7941a0e..7e6dd87064 100644
 --- a/vllm/v1/worker/gpu_worker.py
 +++ b/vllm/v1/worker/gpu_worker.py
 @@ -548,7 +548,9 @@ class Worker(WorkerBase):
@@ -790,7 +843,7 @@ index 18c7941a0e..846bcc8ac6 100644
  
          if self.vllm_config.model_config.enable_sleep_mode:
              from vllm.device_allocator.cumem import CuMemAllocator
-@@ -732,6 +734,12 @@ class Worker(WorkerBase):
+@@ -732,6 +734,17 @@ class Worker(WorkerBase):
      def reset_encoder_cache(self) -> None:
          self.model_runner.reset_encoder_cache()
  
@@ -799,6 +852,11 @@ index 18c7941a0e..846bcc8ac6 100644
 +        if request is None or request.generator is None:
 +            return None
 +        return bytes(request.generator.get_state().tolist())
++
++    def asyncpb_tail_worker(self, operation, payload):
++        from blade_kvt.hybrid_connector.migration.transaction_worker import worker_rpc
++
++        return worker_rpc(self, operation, payload)
 +
      def get_model(self) -> nn.Module:
          return self.model_runner.get_model()

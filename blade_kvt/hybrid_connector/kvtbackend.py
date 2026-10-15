@@ -18,6 +18,7 @@ import vllm.envs as envs
 from vllm.model_executor.models.registry import ModelRegistry
 from . import HybridMetadata
 from vllm.v1.request import RequestStatus
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.v1.utils import ConstantList
 
 from . import (
@@ -61,6 +62,7 @@ from .engine_proxy import (
     sched_get_kvblk_ids,
     sched_rpc_server,
     sched_rpc_server_port,
+    sched_rpc_server_host,
     set_param,
     use_flashinfer,
     use_mla,
@@ -382,6 +384,11 @@ def _reg_naming(naming_cli, cfg: VllmConfig):
 
 
 def _set_worker_envs(cfg: VllmConfig):
+    extra = cfg.kv_transfer_config.kv_connector_extra_config
+    if "kvt_port" in extra:
+        os.environ["BLLM_KVTRANS_PORT_BASE"] = str(extra["kvt_port"])
+    if "nic_affinity" in extra:
+        os.environ["LLX_KVT_NIC_AFFINITY"] = extra["nic_affinity"]
     blade_kvt.set_envs()
     # FLASH_CACHE_SHAPE = 2, see envcfg.h in blade_kvt
     # NOTE: mla attn backend's kv shape:
@@ -399,7 +406,7 @@ def _set_worker_envs(cfg: VllmConfig):
         os.environ.setdefault("BLLM_KVTRANS_CACHE_SHAPE", "5")
     else:
         os.environ.setdefault("BLLM_KVTRANS_CACHE_SHAPE", "2")
-    core_ip = "127.0.0.1"
+    core_ip = sched_rpc_server_host(cfg)
     sdaddr = f"{core_ip}:{rpc_port(cfg)}"
     os.environ.setdefault("BLLM_KVTRANS_SEND_DONE_ADDR", sdaddr)
     return
@@ -536,10 +543,10 @@ class PBackend(HybridBackend):
         self._enable_prefix_caching = self._cfg.cache_config.enable_prefix_caching
 
         if role == KVConnectorRole.WORKER:
+            _set_worker_envs(vllm_config)
             generate_nic_affinity()
             os.environ.setdefault("ACCL_RX_DEPTH", "4")
             os.environ.setdefault("BLLM_KVTRANS_RESERVE", "4096,128;")
-            _set_worker_envs(vllm_config)
             self._main_tid = threading.get_native_id()
             self._bladkv_cli = None
         else:
@@ -568,9 +575,13 @@ class PBackend(HybridBackend):
 
     # disagg thread, core thread
     def _tp_size(self):
-        return self._cfg.parallel_config.tensor_parallel_size
+        return self._cfg.parallel_config.world_size
 
     async def _do_send_done(self, worker_tprank: int, ioret: IoRet):
+        from .engine_proxy import _g_core
+        transaction = getattr(_g_core, "_asyncpb_tail", None)
+        if transaction is not None and transaction.record_done(worker_tprank, ioret):
+            return
         tpsize = self._tp_size()
         state: Optional[_SendingReq] = try_advance(
             self._sending, ioret, worker_tprank, tpsize
@@ -1261,7 +1272,8 @@ class PBackend(HybridBackend):
                     token_bytes.append(cache_shape[2] * layer_tensor.element_size())
         block_size = self._cfg.cache_config.block_size
         block_bytes = [token_byte * block_size for token_byte in token_bytes]
-        rank = get_tensor_model_parallel_rank()
+        rank = (get_pp_group().rank_in_group * get_tp_group().world_size
+                + get_tensor_model_parallel_rank())
         worker_id = get_tp_group().rank
         if kvt_protocol() == "rdma":
             protocol = bladekv.KVTransferProtocolType.RDMA_DIRECT
@@ -1278,7 +1290,7 @@ class PBackend(HybridBackend):
 
         self._bladkv_cli = bladekv.KVTransferClient(
             self._inst_id,
-            self._cfg.parallel_config.tensor_parallel_size,
+            self._cfg.parallel_config.world_size,
             worker_id=worker_id,
             worker_tp_rank=rank,
             block_bytes=block_bytes,
@@ -1396,11 +1408,11 @@ class DBackend(HybridBackend):
         self._enable_prefix_caching = self._cfg.cache_config.enable_prefix_caching
 
         if role == KVConnectorRole.WORKER:
+            _set_worker_envs(vllm_config)
             generate_nic_affinity()
             # 32 is default value
             # os.environ.setdefault('ACCL_RX_DEPTH', '32')
             os.environ.setdefault("BLLM_KVTRANS_RESERVE", "4096,128;")
-            _set_worker_envs(vllm_config)
         else:
             # _reg_naming(self._naming_cli, cfg)
             ### R/W: disagg thread
@@ -1430,7 +1442,7 @@ class DBackend(HybridBackend):
                 self._pmgr = None
                 self._workers_info = [
                     ""
-                ] * self._cfg.parallel_config.tensor_parallel_size
+                ] * self._cfg.parallel_config.world_size
                 # Initialize event for fake naming case
                 self._workers_info_event = threading.Event()
 
@@ -1471,7 +1483,7 @@ class DBackend(HybridBackend):
 
     # disagg thread, core thread
     def _tp_size(self):
-        return self._cfg.parallel_config.tensor_parallel_size
+        return self._cfg.parallel_config.world_size
 
     async def _on_register_worker(self, reader, writer):
         """Handle worker registration request when naming is not available
@@ -1926,7 +1938,8 @@ class DBackend(HybridBackend):
                     token_bytes.append(cache_shape[2] * layer_tensor.element_size())
         block_size = self._cfg.cache_config.block_size
         block_bytes = [token_byte * block_size for token_byte in token_bytes]
-        rank = get_tensor_model_parallel_rank()
+        rank = (get_pp_group().rank_in_group * get_tp_group().world_size
+                + get_tensor_model_parallel_rank())
         worker_id = get_tp_group().rank
         if kvt_protocol() == "rdma":
             protocol = bladekv.KVTransferProtocolType.RDMA_DIRECT
@@ -1943,7 +1956,7 @@ class DBackend(HybridBackend):
 
         self._bladkv_srv = bladekv.KVTransferServer(
             self._inst_id,
-            self._cfg.parallel_config.tensor_parallel_size,
+            self._cfg.parallel_config.world_size,
             worker_id=worker_id,
             worker_tp_rank=rank,
             block_bytes=block_bytes,
@@ -1969,7 +1982,7 @@ class DBackend(HybridBackend):
     async def _register_worker_rpc(self, worker_tp_rank: int, winfo: str):
         """Send worker registration RPC to scheduler when naming is not available"""
         # Get scheduler address from environment or config
-        core_ip = "127.0.0.1"
+        core_ip = sched_rpc_server_host(self._cfg)
         scheduler_port = rpc_port(self._cfg)
 
         # Send worker_id and winfo directly

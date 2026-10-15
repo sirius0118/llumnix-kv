@@ -348,9 +348,13 @@ def sched_rpc_server_port(cfg: VllmConfig) -> int:
         return envs.VLLM_DP_MASTER_PORT + 10 + dprank + 256
     rpc_port = cfg.kv_transfer_config.kv_connector_extra_config.get("rpc_port", None)
     if rpc_port is not None:
-        return rpc_port
+        return rpc_port + cfg.parallel_config.data_parallel_rank
     assert cfg.kv_transfer_config.engine_available_port > 0
     return cfg.kv_transfer_config.engine_available_port
+
+
+def sched_rpc_server_host(cfg: VllmConfig) -> str:
+    return cfg.kv_transfer_config.get_from_extra_config("rpc_host", "127.0.0.1")
 
 
 def use_mla() -> bool:

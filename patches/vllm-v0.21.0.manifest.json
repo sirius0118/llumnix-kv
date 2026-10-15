@@ -1,0 +1,70 @@
+{
+  "vllm/config/kv_transfer.py": {
+    "base": "d661008cfb85fbe0758994ab1970c55199e68abcd3633fd9d12e8b39d99d1652",
+    "patched": "5544635e5b7f44879957fc83a412a093aea918b7d7de2dbf68b62875b1b09e3c"
+  },
+  "vllm/distributed/kv_transfer/kv_connector/factory.py": {
+    "base": "e90b2eb336d11b164773b49bc6a5c92cb467e3eb7bf4f34ec854714e95779441",
+    "patched": "88bdc1a796aa9b77f83d3b874e7061cd795e738343c601a5ce35c42f3d7b8c80"
+  },
+  "vllm/distributed/kv_transfer/kv_connector/v1/base.py": {
+    "base": "c04a65137778e0cc21ee8872111af35e87a0b53256bcf097e3cb4e1fc77c0b2a",
+    "patched": "71ae90cc2f9e0da581c91d81c13c67b0d5942ff3c14c4d237472705a5085c47c"
+  },
+  "vllm/distributed/kv_transfer/kv_transfer_state.py": {
+    "base": "28ee7b8fa40134ba8515267b0dac35525dffe4cfaff093446cf916e88a8f1b3a",
+    "patched": "19008a722841b8b5c4847f274d8942aeb224c140c0a4400d85f7604163ed364a"
+  },
+  "vllm/envs.py": {
+    "base": "6083fd9c166fa347ab96ed98613f72f8502e35dfe3721becf4e4ddb5431005f5",
+    "patched": "7c64c24d906c35e09b2840525ff040f37eaa1c7970fbbe67103f336cbaef02cb"
+  },
+  "vllm/v1/core/kv_cache_manager.py": {
+    "base": "0d7e4cc0ee8d4ed375edc29cd42a7b13855ec6d6ab3b87611fe26bb0b213488b",
+    "patched": "da3c5bdf023bced376c8406aadc8a8877d83fe41bdbd688babf6fe238e3f55b6"
+  },
+  "vllm/v1/core/sched/interface.py": {
+    "base": "65fa9a22359f4103a521379d7471e2063f2b1a80b95646b30f22efdd3d6b7b9e",
+    "patched": "02ebcfc9292771b4cce813be7dae50c29bd92a2beea6272fde63ef71d88a8302"
+  },
+  "vllm/v1/core/sched/output.py": {
+    "base": "44230b995721a011dbe2c1d012371b1d9ec844b1b09abfc24dd0c6d8a9e307fc",
+    "patched": "49d40c85cad3f9a234c807fa5e2ded548956a096ca00dfc7c3ba84b760ab503c"
+  },
+  "vllm/v1/core/sched/scheduler.py": {
+    "base": "4145257a7ecaf921026cf76d61d615c366d2cabcff9cb826a4c1ce32001edfa4",
+    "patched": "21b354812126b9a544a8f8b6e2ad77e7a5dedaa38825d0470872b12c815e3a21"
+  },
+  "vllm/v1/engine/__init__.py": {
+    "base": "75c4df682d32da2351394afb219fa42a6c95579e75105460c776704e30129228",
+    "patched": "9eb3390fcc764e4ff2d6c0c7881e0b6c3dd1c4ccd88600b37bb7acaae333cc28"
+  },
+  "vllm/v1/engine/core.py": {
+    "base": "53ff4df24745e3ac4ac09028ddeb310f6627b90f6374dbfa82548e97c9bc65bc",
+    "patched": "7587cab291af3e8dc7872504989cdb1af3829381f3c1b237e5487b0d8790244b"
+  },
+  "vllm/v1/outputs.py": {
+    "base": "e4a25e559d604518e786239d221928154efb9fe018d5ea2adbe1b35ce21dfd25",
+    "patched": "e3b94f7e0e36055064cc33448a3a285d5ecd24a6fae54c1e8a58722055675719"
+  },
+  "vllm/v1/request.py": {
+    "base": "5e06a5b0c67930a9d21083b369b91d2b37a17e74a50d98cc63b5d15910495f12",
+    "patched": "41243ef2e6fc3acd471ad8e96f380ea0c37c9e53731b51cf086803a6f45ed949"
+  },
+  "vllm/v1/serial_utils.py": {
+    "base": "a87f4cc50114eef931834270242b94c2ed2fc7fb78e9bdb7636428d0a99bf998",
+    "patched": "d5ca5326fc3d0260cb8057c98d9c196279020f13c3bef7f07a56e6492017ec12"
+  },
+  "vllm/v1/worker/gpu_model_runner.py": {
+    "base": "95b7ee3ff5eecdb0fa791f375b2aeedc6ac507f3ea4a9683700d3b202b2caf08",
+    "patched": "48cb70e217db39ff8a02117209f28eaec62882622c9d2740d6c5b00bb0722275"
+  },
+  "vllm/v1/worker/gpu_worker.py": {
+    "base": "53196cef1d32b5c5207c8986a5666352fd5ba0b79c418c074311147f266cadc4",
+    "patched": "7b5201c5d4720bdf5064e4d70dc6021b54cb6d5b643ae674eeb372fb7e0b1ba7"
+  },
+  "vllm/v1/worker/kv_connector_model_runner_mixin.py": {
+    "base": "5140651dc23d25c4c744306dd49002071336187ceccfc67e1be45f5fc8fd75b2",
+    "patched": "66fe2756a1bc21912067fd43f9cbc2dd30b8c6c0e6c90f6f0c5b1ee4a2e4bffd"
+  }
+}
