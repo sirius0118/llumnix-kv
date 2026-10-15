@@ -20,7 +20,7 @@ from zmq import (  # type: ignore
 )
 
 import vllm.envs as envs
-from vllm.utils.network_utils import get_ip, get_open_port
+from vllm.utils.network_utils import get_open_port
 
 # yapf: disable
 from .engine_proxy import (
@@ -63,6 +63,7 @@ from .utils import (
     ConnPool,
     IoRet,
     IoState,
+    get_ip,
     handle_done_req,
     kill_me_if_exception,
     try_advance,

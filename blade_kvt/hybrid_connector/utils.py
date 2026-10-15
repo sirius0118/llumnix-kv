@@ -1,6 +1,9 @@
 import asyncio
+import fcntl
+import ipaddress
 import os
 import random
+import socket
 import struct
 import threading
 import time
@@ -16,8 +19,35 @@ import uvloop
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_ip as vllm_get_ip
 
 logger = init_logger(__name__)
+
+
+def get_ip() -> str:
+    """Resolve this process's IPv4 control address without changing vLLM networking."""
+    interface = os.environ.get("LLX_KVT_INTERFACE")
+    if interface:
+        name = interface.encode()
+        if len(name) >= 16 or b"\0" in name:
+            raise ValueError(f"Invalid LLX_KVT_INTERFACE: {interface!r}")
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                # Linux SIOCGIFADDR returns sockaddr_in at offset 16 in ifreq.
+                result = fcntl.ioctl(sock.fileno(), 0x8915, struct.pack("256s", name))
+            ip = socket.inet_ntoa(result[20:24])
+        except OSError as exc:
+            raise ValueError(f"LLX_KVT_INTERFACE={interface!r} has no local IPv4 address") from exc
+    else:
+        ip = vllm_get_ip()
+    try:
+        ipaddress.IPv4Address(ip)
+    except ValueError as exc:
+        raise ValueError(
+            f"llumnix-kv control plane requires IPv4, got {ip!r}; "
+            "set LLX_KVT_INTERFACE to a local IPv4 interface or VLLM_HOST_IP to its IPv4 address"
+        ) from exc
+    return ip
 
 
 # All coroutines used as the main of task must apply this decorator.

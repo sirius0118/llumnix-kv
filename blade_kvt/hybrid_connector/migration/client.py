@@ -4,10 +4,10 @@ import asyncio
 import struct
 from collections import defaultdict
 
-from vllm.utils.network_utils import get_ip
 from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
+from ..utils import get_ip
 from .transaction import decode, encode
 
 

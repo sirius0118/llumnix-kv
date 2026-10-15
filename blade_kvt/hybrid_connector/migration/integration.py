@@ -12,8 +12,9 @@ from pathlib import Path
 
 def configure(vllm_config):
     from vllm.config import KVTransferConfig
-    from vllm.utils.network_utils import get_ip
     from vllm.v1.engine.core import EngineCore
+
+    from ..utils import get_ip
 
     if version("vllm") != "0.21.0+zeta.all" or not hasattr(EngineCore, "asyncpb_tail"):
         raise RuntimeError("Install the pinned llumnix-kv v0.21 patch before starting AsyncPB migration")

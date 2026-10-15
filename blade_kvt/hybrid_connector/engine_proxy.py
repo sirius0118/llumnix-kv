@@ -29,7 +29,7 @@ from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.math_utils import cdiv
-from vllm.utils.network_utils import get_ip, get_open_port
+from vllm.utils.network_utils import get_open_port
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
@@ -60,7 +60,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
-from .utils import RpcServer, start_asyncio_thread
+from .utils import RpcServer, get_ip, start_asyncio_thread
 
 if TYPE_CHECKING:
     from vllm.v1.engine.core import EngineCoreProc
