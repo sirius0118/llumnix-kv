@@ -260,7 +260,7 @@ class CoreTransactions:
         blocks = self.manager.get_blocks(request.request_id)
         pinned = [block for group in blocks.blocks for block in group if not block.is_null]
         self.manager.block_pool.touch(pinned)
-        tx["pins"].extend(pinned)
+        tx["pins"].append(pinned)
         snapshot = copy.deepcopy(request)
         snapshot.num_computed_tokens = computed
         return {
@@ -485,7 +485,10 @@ class CoreTransactions:
         return True
 
     def _unpin(self, tx):
-        self.manager.block_pool.free_blocks(tx["pins"])
+        # vLLM decrements a whole batch before appending zero-ref blocks. Keep
+        # overlapping prefix/delta pins separate so each block is enqueued once.
+        for pins in tx["pins"]:
+            self.manager.block_pool.free_blocks(pins)
         tx["pins"].clear()
 
     def _retire(self, tx):
