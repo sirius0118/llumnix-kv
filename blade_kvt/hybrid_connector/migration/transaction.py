@@ -302,14 +302,18 @@ class CoreTransactions:
             + sum(self.admissions.values())
             + sum(bool(t.get("slot")) for t in self.transactions.values())
         )
-        if self.updating or occupied >= self.scheduler.scheduler_config.max_num_seqs:
+        request = decode(source["request"])
+        extent = request.num_prompt_tokens + request.max_tokens
+        if (
+            self.updating
+            or occupied >= self.scheduler.scheduler_config.max_num_seqs
+            or extent > self.scheduler.max_model_len
+        ):
             tx["retired"] = True
             return None
-        request = decode(source["request"])
         if request.request_id in self.scheduler.requests:
             raise ValueError("Target request ID already exists")
         request.num_computed_tokens = 0
-        extent = min(request.num_prompt_tokens + request.max_tokens, self.scheduler.max_model_len)
         allocation = self.manager.allocate_slots(request, extent, delay_cache_blocks=True)
         if allocation is None:
             tx["retired"] = True
